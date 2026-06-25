@@ -5,7 +5,7 @@ import random
 import os
 from telebot import types
 
-TOKEN = os.getenv("BOT_TOKEN")
+TOKEN = os.getenv("TOKEN")
 if not TOKEN:
     TOKEN = input("Enter your Telegram Bot Token: ")
 
