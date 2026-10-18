@@ -223,9 +223,8 @@ def build_output_file(cards, is_tester=False):
     body = "\n".join(format_card_block(c, is_tester=is_tester) for c in cards)
     footer = (
         "\n\n══════════════════════════════════════\n"
-        "E$CO • Formatted batch\n"
-        "All shown LIVE • VR 100% (display)\n"
-        "Send vouches after hits — keeps the desk alive\n"
+        "E$CO • Best Quality Data\n"
+        "Send vouches after hits — All Are Appreciated\n"
         "══════════════════════════════════════\n"
     )
     return body + footer
