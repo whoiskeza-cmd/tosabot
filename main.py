@@ -191,7 +191,7 @@ def format_card_block(c, is_tester=False):
     country = c.get("country") or info.get("country", "US")
     lines = [
         "══════════════════════════════════════",
-        f"🃏 LIVE • VR: {vr}%",
+        f"🃏 LIVE DATA • VR: {vr}%",
         "══════════════════════════════════════",
         f"👤 Name    : {c['name']}",
         f"💳 Card    : {c['pan']}",
@@ -213,7 +213,7 @@ def format_card_block(c, is_tester=False):
         "══════════════════════════════════════",
     ]
     if is_tester:
-        lines.append("❤️ Thank You For Choosing E$CO ❤️")
+        lines.append("❤️ Great Quality Tester From E$CO ❤️")
     lines.append("")
     lines.append("⭐ Leave a vouch after successful use — E$CO")
     lines.append("")
