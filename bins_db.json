@@ -1,0 +1,15 @@
+{
+  "410039": {"brand":"VISA","type":"CREDIT","level":"TRADITIONAL","bank":"CITIBANK, N.A.- COSTCO","country":"UNITED STATES","cc":"US","rating":"10/10","vr":10,"balance_rating":10,"suggestion":"Costco/Amazon","forced_vr":null},
+  "410040": {"brand":"VISA","type":"CREDIT","level":"BUSINESS","bank":"CITIBANK, N.A.- COSTCO","country":"UNITED STATES","cc":"US","rating":"10/10","vr":10,"balance_rating":10,"suggestion":"Biz spend","forced_vr":null},
+  "414720": {"brand":"VISA","type":"CREDIT","level":"TRADITIONAL","bank":"JPMORGAN CHASE BANK N.A.","country":"UNITED STATES","cc":"US","rating":"10/10","vr":10,"balance_rating":10,"suggestion":"Chase online","forced_vr":null},
+  "414740": {"brand":"VISA","type":"CREDIT","level":"TRADITIONAL","bank":"JPMORGAN CHASE BANK N.A.","country":"UNITED STATES","cc":"US","rating":"10/10","vr":10,"balance_rating":10,"suggestion":"Chase online","forced_vr":null},
+  "440066": {"brand":"VISA","type":"CREDIT","level":"TRADITIONAL","bank":"BANK OF AMERICA - CONSUMER CREDIT","country":"UNITED STATES","cc":"US","rating":"10/10","vr":10,"balance_rating":10,"suggestion":"BofA","forced_vr":null},
+  "483312": {"brand":"VISA","type":"DEBIT","level":"CLASSIC","bank":"JPMORGAN CHASE BANK N.A. - DEBIT","country":"UNITED STATES","cc":"US","rating":"10/10","vr":10,"balance_rating":10,"suggestion":"Debit billpay","forced_vr":null},
+  "483316": {"brand":"VISA","type":"DEBIT","level":"CLASSIC","bank":"JPMORGAN CHASE BANK N.A. - DEBIT","country":"UNITED STATES","cc":"US","rating":"10/10","vr":10,"balance_rating":10,"suggestion":"Debit billpay","forced_vr":null},
+  "513371": {"brand":"MASTERCARD","type":"CREDIT","level":"STANDARD","bank":"NEWDAY, LTD.","country":"UNITED KINGDOM","cc":"GB","rating":"9/10","vr":9,"balance_rating":8,"suggestion":"UK online","forced_vr":null},
+  "513379": {"brand":"MASTERCARD","type":"DEBIT","level":"STANDARD","bank":"BANQUE FEDERATIVE DU CREDIT MUTUEL (BFCM)","country":"FRANCE","cc":"FR","rating":"8/10","vr":8,"balance_rating":8,"suggestion":"EU online","forced_vr":null},
+  "521729": {"brand":"MASTERCARD","type":"DEBIT","level":"STANDARD","bank":"COMMONWEALTH BANK OF AUSTRALIA","country":"AUSTRALIA","cc":"AU","rating":"8/10","vr":8,"balance_rating":8,"suggestion":"AU online","forced_vr":null},
+  "534348": {"brand":"MASTERCARD","type":"CREDIT","level":"PLATINUM","bank":"CELTIC BANK CORPORATION","country":"UNITED STATES","cc":"US","rating":"10/10","vr":10,"balance_rating":10,"suggestion":"US platinum","forced_vr":null},
+  "542418": {"brand":"MASTERCARD","type":"CREDIT","level":"PLATINUM","bank":"CITIBANK N.A.","country":"UNITED STATES","cc":"US","rating":"10/10","vr":10,"balance_rating":10,"suggestion":"Citi","forced_vr":null},
+  "546616": {"brand":"MASTERCARD","type":"CREDIT","level":"WORLD","bank":"CITIBANK N.A.","country":"UNITED STATES","cc":"US","rating":"10/10","vr":10,"balance_rating":10,"suggestion":"Citi World","forced_vr":null}
+}
