@@ -1,1037 +1,893 @@
-# main.py — Private Seller Panel (Telegram)
-# Railway: set BOT_TOKEN, ADMIN_IDS (comma-sep), optional API_URL
-# Fix for your crash: range(N) must match the exact number of unpacked names (was 28 vs 27).
-
 import os, re, json, random, io
 from datetime import datetime, timezone
-from collections import defaultdict
-
-from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, ReplyKeyboardRemove
-)
+from pathlib import Path
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, MessageHandler,
-    ContextTypes, filters, ConversationHandler
+    ContextTypes, filters
 )
 
-# ───────────────────────── CONFIG ─────────────────────────
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN")
-ADMIN_IDS = set(
-    int(x.strip()) for x in os.environ.get("ADMIN_IDS", "123456789").split(",") if x.strip()
-)
-# Optional external checker URL (show-only; live rate forced 100%)
-API_URL = os.environ.get("API_URL", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN")
+OWNER_ID = int(os.getenv("OWNER_ID", "0"))
+ADMIN_IDS = set()
+_raw_admins = os.getenv("ADMIN_IDS", "")
+if _raw_admins.strip():
+    ADMIN_IDS = {int(x.strip()) for x in _raw_admins.split(",") if x.strip()}
+ADMIN_IDS.add(OWNER_ID)
 
-DATA_DIR = os.environ.get("DATA_DIR", ".")
-STATS_FILE = os.path.join(DATA_DIR, "stats.json")
-SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
-STOCK_FILE = os.path.join(DATA_DIR, "stockpile.json")
-BINDB_FILE = os.path.join(DATA_DIR, "bins_db.json")
-BATCH_FILE = os.path.join(DATA_DIR, "batch_counter.txt")
+DATA = Path(".")
+BINS_DB = DATA / "bins_db.json"
+STOCK_DB = DATA / "stockpile.json"
+STATS_DB = DATA / "stats.json"
+SETTINGS_DB = DATA / "settings.json"
 
-# Conversation states — MUST equal len(range(...)) on the right-hand side
-(
-    MENU,
-    FMT_WAIT_CARDS, FMT_USA_FOR, FMT_PRE, FMT_POST, FMT_REMOVE, FMT_FNAME,
-    SALE_NAME, SALE_QTY, SALE_WAIT_CARDS, SALE_USA_FOR, SALE_PRE, SALE_POST, SALE_REMOVE,
-    REP_NAME, REP_QTY, REP_WAIT_CARDS, REP_USA_FOR, REP_PRE, REP_POST, REP_REMOVE,
-    TEST_TYPE, TEST_WAIT_CARDS, TEST_USA_FOR, TEST_PRE, TEST_POST, TEST_REMOVE, TEST_FNAME,
-    RATE_MENU, RATE_BIN, RATE_VALUE, RATE_SUGGEST, RATE_FORCE,
-    SETTINGS_MENU, SETTINGS_VALUE,
-    STOCK_MENU, STOCK_BIN, STOCK_AMT, STOCK_FNAME, STOCK_SEARCH,
-) = range(40)  # 40 names ↔ range(40)  — fixes ValueError too many/few to unpack
-
-# ───────────────────────── BIN DB (seed + file) ─────────────────────────
-DEFAULT_BINS = {
-    "410039": {"scheme": "visa", "brand": "VISA", "type": "CREDIT", "level": "TRADITIONAL",
-               "bank": "CITIBANK, N.A.- COSTCO", "country": "UNITED STATES", "cc": "US",
-               "rating": "10/10", "vr": 100, "balance_rating": "9/10", "suggestion": "Amazon/Digital", "force_vr": None},
-    "410040": {"scheme": "visa", "brand": "VISA", "type": "CREDIT", "level": "BUSINESS",
-               "bank": "CITIBANK, N.A.- COSTCO", "country": "UNITED STATES", "cc": "US",
-               "rating": "10/10", "vr": 100, "balance_rating": "9/10", "suggestion": "Amazon/Digital", "force_vr": None},
-    "414720": {"scheme": "visa", "brand": "VISA", "type": "CREDIT", "level": "TRADITIONAL",
-               "bank": "JPMORGAN CHASE BANK N.A.", "country": "UNITED STATES", "cc": "US",
-               "rating": "9/10", "vr": 100, "balance_rating": "8/10", "suggestion": "Retail/POS", "force_vr": None},
-    "414740": {"scheme": "visa", "brand": "VISA", "type": "CREDIT", "level": "TRADITIONAL",
-               "bank": "JPMORGAN CHASE BANK N.A.", "country": "UNITED STATES", "cc": "US",
-               "rating": "9/10", "vr": 100, "balance_rating": "8/10", "suggestion": "Retail/POS", "force_vr": None},
-    "440066": {"scheme": "visa", "brand": "VISA", "type": "CREDIT", "level": "TRADITIONAL",
-               "bank": "BANK OF AMERICA - CONSUMER CREDIT", "country": "UNITED STATES", "cc": "US",
-               "rating": "8/10", "vr": 100, "balance_rating": "8/10", "suggestion": "Online", "force_vr": None},
-    "483312": {"scheme": "visa", "brand": "VISA", "type": "DEBIT", "level": "CLASSIC",
-               "bank": "JPMORGAN CHASE BANK N.A. - DEBIT", "country": "UNITED STATES", "cc": "US",
-               "rating": "7/10", "vr": 100, "balance_rating": "7/10", "suggestion": "Low ticket", "force_vr": None},
-    "483316": {"scheme": "visa", "brand": "VISA", "type": "DEBIT", "level": "CLASSIC",
-               "bank": "JPMORGAN CHASE BANK N.A. - DEBIT", "country": "UNITED STATES", "cc": "US",
-               "rating": "7/10", "vr": 100, "balance_rating": "7/10", "suggestion": "Low ticket", "force_vr": None},
-    "513371": {"scheme": "mastercard", "brand": "MASTERCARD", "type": "CREDIT", "level": "STANDARD",
-               "bank": "NEWDAY, LTD.", "country": "UNITED KINGDOM", "cc": "GB",
-               "rating": "6/10", "vr": 100, "balance_rating": "6/10", "suggestion": "EU digital", "force_vr": None},
-    "513379": {"scheme": "mastercard", "brand": "MASTERCARD", "type": "DEBIT", "level": "STANDARD",
-               "bank": "BANQUE FEDERATIVE DU CREDIT MUTUEL (BFCM)", "country": "FRANCE", "cc": "FR",
-               "rating": "6/10", "vr": 100, "balance_rating": "6/10", "suggestion": "EU digital", "force_vr": None},
-    "521729": {"scheme": "mastercard", "brand": "MASTERCARD", "type": "DEBIT", "level": "STANDARD",
-               "bank": "COMMONWEALTH BANK OF AUSTRALIA", "country": "AUSTRALIA", "cc": "AU",
-               "rating": "6/10", "vr": 100, "balance_rating": "6/10", "suggestion": "AU local", "force_vr": None},
-    "534348": {"scheme": "mastercard", "brand": "MASTERCARD", "type": "CREDIT", "level": "PLATINUM",
-               "bank": "CELTIC BANK CORPORATION", "country": "UNITED STATES", "cc": "US",
-               "rating": "8/10", "vr": 100, "balance_rating": "8/10", "suggestion": "Online", "force_vr": None},
-    "542418": {"scheme": "mastercard", "brand": "MASTERCARD", "type": "CREDIT", "level": "PLATINUM",
-               "bank": "CITIBANK N.A.", "country": "UNITED STATES", "cc": "US",
-               "rating": "9/10", "vr": 100, "balance_rating": "9/10", "suggestion": "Amazon", "force_vr": None},
-    "546616": {"scheme": "mastercard", "brand": "MASTERCARD", "type": "CREDIT", "level": "WORLD",
-               "bank": "CITIBANK N.A.", "country": "UNITED STATES", "cc": "US",
-               "rating": "9/10", "vr": 100, "balance_rating": "9/10", "suggestion": "High ticket", "force_vr": None},
+DEFAULT_SETTINGS = {
+    "sale_price": 15.0,   # revenue per live card sold
+    "card_cost": 3.0,     # your cost per card (profit = sale_price - card_cost)
 }
 
+# conversation keys in context.user_data
+# mode: format|sale|replace|tester|stock|rate|settings|None
+
 def load_json(path, default):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return default
+    if not path.exists():
+        path.write_text(json.dumps(default, indent=2))
+        return json.loads(json.dumps(default))
+    return json.loads(path.read_text())
 
-def save_json(path, data):
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+def save_json(path, obj):
+    path.write_text(json.dumps(obj, indent=2))
 
-def load_bins():
-    db = load_json(BINDB_FILE, {})
-    if not db:
-        db = DEFAULT_BINS.copy()
-        save_json(BINDB_FILE, db)
-    # merge defaults for missing keys
-    for k, v in DEFAULT_BINS.items():
-        if k not in db:
-            db[k] = v
-    return db
+def bins():
+    return load_json(BINS_DB, {})
 
-def save_bins(db):
-    save_json(BINDB_FILE, db)
+def save_bins(d):
+    save_json(BINS_DB, d)
 
-def default_settings():
-    return {"sale_price": 5.0, "card_cost": 1.0}
+def stock():
+    return load_json(STOCK_DB, {})
 
-def load_settings():
-    s = load_json(SETTINGS_FILE, default_settings())
-    for k, v in default_settings().items():
-        s.setdefault(k, v)
-    return s
+def save_stock(d):
+    save_json(STOCK_DB, d)
 
-def save_settings(s):
-    save_json(SETTINGS_FILE, s)
+def settings():
+    return load_json(SETTINGS_DB, DEFAULT_SETTINGS)
 
-def default_stats():
-    return {
-        "cards_sold": 0, "total_sales": 0, "revenue": 0.0,
-        "testers_given": 0, "replacements_given": 0, "total_profit": 0.0
-    }
+def save_settings(d):
+    save_json(SETTINGS_DB, d)
 
-def load_all_stats():
-    return load_json(STATS_FILE, {})
+def all_stats():
+    return load_json(STATS_DB, {})
 
-def save_all_stats(st):
-    save_json(STATS_FILE, st)
+def save_all_stats(d):
+    save_json(STATS_DB, d)
 
-def get_user_stats(uid):
-    st = load_all_stats()
-    key = str(uid)
-    if key not in st:
-        st[key] = default_stats()
-        save_all_stats(st)
-    return st[key]
+def user_stats(uid: int):
+    s = all_stats()
+    k = str(uid)
+    if k not in s:
+        s[k] = {
+            "cards_sold": 0,
+            "total_sales": 0,
+            "revenue": 0.0,
+            "testers_given": 0,
+            "replacements_given": 0,
+            "total_profit": 0.0,
+        }
+        save_all_stats(s)
+    return s[k]
 
-def set_user_stats(uid, user_st):
-    st = load_all_stats()
-    st[str(uid)] = user_st
-    save_all_stats(st)
+def put_user_stats(uid: int, st):
+    s = all_stats()
+    s[str(uid)] = st
+    save_all_stats(s)
 
-def load_stock():
-    return load_json(STOCK_FILE, {})  # bin -> qty
-
-def save_stock(stock):
-    save_json(STOCK_FILE, stock)
-
-def next_batch():
-    try:
-        n = int(open(BATCH_FILE).read().strip()) + 1
-    except Exception:
-        n = 1
-    with open(BATCH_FILE, "w") as f:
-        f.write(str(n))
-    return n
-
-# ───────────────────────── PARSE / FORMAT ─────────────────────────
-# Input: pan|mm/yy|cvv|name|street|city|state|zip|cc|phone|email|ip
-CARD_RE = re.compile(
-    r"^\s*(\d{13,19})\|(\d{1,2}/\d{2,4})\|(\d{3,4})\|([^|]*)\|([^|]*)\|([^|]*)\|([^|]*)\|([^|]*)\|([^|]*)\|([^|]*)\|([^|]*)\|?([^|]*)\s*$"
-)
-
-def get_random_ip():
-    return ".".join(str(random.randint(1, 254)) for _ in range(4))
-
-def parse_line(line):
-    line = line.strip()
-    if not line or line.startswith("#"):
-        return None
-    m = CARD_RE.match(line)
-    if not m:
-        # try loose split
-        parts = [p.strip() for p in line.split("|")]
-        if len(parts) < 3:
-            return None
-        while len(parts) < 12:
-            parts.append("")
-        pan, exp, cvv = parts[0], parts[1], parts[2]
-        name, street, city, state, zipc, cc, phone, email, ip = parts[3:12]
-    else:
-        pan, exp, cvv, name, street, city, state, zipc, cc, phone, email, ip = m.groups()
-    pan = re.sub(r"\D", "", pan)
-    if len(pan) < 13:
-        return None
-    bin6 = pan[:6]
-    return {
-        "pan": pan, "exp": exp, "cvv": cvv, "name": name or "N/A",
-        "street": street or "", "city": city or "", "state": state or "",
-        "zip": zipc or "", "cc": (cc or "US").upper()[:2],
-        "phone": phone or "", "email": email or "",
-        "ip": ip or get_random_ip(), "bin": bin6, "raw": line
-    }
-
-def parse_cards_text(text):
-    cards = []
-    for line in text.replace("\r", "\n").split("\n"):
-        c = parse_line(line)
-        if c:
-            cards.append(c)
-    return cards
-
-def bin_info(bin6, bins_db):
-    b = bins_db.get(bin6) or {
-        "scheme": "unknown", "brand": "UNKNOWN", "type": "", "level": "",
-        "bank": "UNKNOWN", "country": "UNKNOWN", "cc": "US",
-        "rating": "5/10", "vr": 100, "balance_rating": "5/10",
-        "suggestion": "General", "force_vr": None
-    }
-    return b
-
-def format_card_block(card, bins_db, is_tester=False):
-    b = bin_info(card["bin"], bins_db)
-    addr = ", ".join(x for x in [card["street"], card["city"], card["state"], card["zip"], card.get("cc") or b.get("cc", "US")] if x)
-    brand = b.get("brand") or b.get("scheme") or "CARD"
-    country = b.get("cc") or card.get("cc") or "US"
-    bank = b.get("bank", "UNKNOWN")
-    rating = b.get("rating", "10/10")
-    suggestion = b.get("suggestion", "")
-    vr = b.get("force_vr") if b.get("force_vr") is not None else 100  # show-only 100
-    lines = [
-        "══════════════════════════════════════",
-        f"👤 Name:{card['name']}💳Card:{card['pan']}📅 Expiry:{card['exp']}🔒CVV:{card['cvv']}🏦Bank:{bank}🌍Country:{country}•{brand}📍Billing Address:{addr}📞Phone: {card['phone']}✉️ Email:{card['email']}🌐",
-        "══════════════════════════════════════",
-        f"🌐 IP      : {card.get('ip') or get_random_ip()}",
-        f"🕒 Checked : {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC",
-        "══════════════════════════════════════",
-        f"BIN Rate   : {rating} | {suggestion}",
-        f"Live       : 100% (VR {vr})",
-        "══════════════════════════════════════",
-    ]
-    if is_tester:
-        lines.append("❤️ High Quality Tester From E$CO ❤️")
-    lines.append("💬 Vouch the seller — send feedback after use")
-    lines.append("══════════════════════════════════════")
-    return "\n".join(lines)
-
-def filter_usa_foreign(cards, usa=True):
-    out = []
-    for c in cards:
-        cc = (c.get("cc") or "").upper()
-        if usa and cc in ("US", "USA", ""):
-            out.append(c)
-        elif not usa and cc not in ("US", "USA", ""):
-            out.append(c)
-        elif usa and cc in ("US", "USA"):
-            out.append(c)
-    # if empty after filter, keep all (user mistake safety)
-    return out or cards
-
-def is_admin(uid):
+def is_admin(uid: int) -> bool:
     return uid in ADMIN_IDS
 
-# ───────────────────────── UI ─────────────────────────
-def main_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Format", callback_data="go_format"),
-         InlineKeyboardButton("Sale", callback_data="go_sale")],
-        [InlineKeyboardButton("Replace", callback_data="go_replace"),
-         InlineKeyboardButton("Tester", callback_data="go_tester")],
-        [InlineKeyboardButton("Rate", callback_data="go_rate"),
-         InlineKeyboardButton("Stats", callback_data="go_stats")],
-        [InlineKeyboardButton("Stockpile", callback_data="go_stock"),
-         InlineKeyboardButton("Settings", callback_data="go_settings")],
-    ])
+def get_random_ip():
+    return f"{random.randint(1,223)}.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(1,254)}"
 
-async def show_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    uname = update.effective_user.username or update.effective_user.first_name or str(uid)
-    text = f"Private Seller Panel\nWelcome @{uname}"
-    if update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=main_keyboard())
-    else:
-        await update.message.reply_text(text, reply_markup=main_keyboard())
-    return MENU
+def batch_id():
+    return f"{random.randint(1000,9999)}"
 
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("Unauthorized.")
-        return ConversationHandler.END
-    context.user_data.clear()
-    return await show_admin_panel(update, context)
+CARD_LINE_RE = re.compile(
+    r"^(?P<cc>\d{13,19})\|(?P<mm>\d{1,2})/(?P<yy>\d{2,4})\|(?P<cvv>\d{3,4})\|(?P<name>[^|]*)\|(?P<street>[^|]*)\|(?P<city>[^|]*)\|(?P<state>[^|]*)\|(?P<zip>[^|]*)\|(?P<country>[^|]*)\|(?P<phone>[^|]*)\|(?P<email>[^|]*)\|?(?P<ip>[^|]*)?$"
+)
 
-async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return ConversationHandler.END
-    context.user_data.clear()
-    if update.callback_query:
-        await update.callback_query.answer()
-    return await show_admin_panel(update, context)
+def parse_cards(text: str):
+    cards = []
+    for raw in text.replace("\r", "\n").split("\n"):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        # pipe format
+        if "|" in line:
+            parts = line.split("|")
+            while len(parts) < 12:
+                parts.append("")
+            cc, exp, cvv, name, street, city, state, zipc, country, phone, email = parts[:11]
+            ip = parts[11] if len(parts) > 11 else ""
+            mm, yy = (exp.split("/") + [""])[:2] if "/" in exp else ("", "")
+            cards.append({
+                "cc": cc.strip(),
+                "mm": mm.strip().zfill(2),
+                "yy": yy.strip()[-2:].zfill(2) if yy else "",
+                "cvv": cvv.strip(),
+                "name": name.strip(),
+                "street": street.strip(),
+                "city": city.strip(),
+                "state": state.strip(),
+                "zip": zipc.strip(),
+                "country": country.strip() or "US",
+                "phone": phone.strip(),
+                "email": email.strip(),
+                "ip": ip.strip() or get_random_ip(),
+            })
+            continue
+        # loose: number exp cvv
+        m = re.search(r"(\d{13,19}).*?(\d{2})\s*/\s*(\d{2,4}).*?(\d{3,4})", line)
+        if m:
+            cards.append({
+                "cc": m.group(1), "mm": m.group(2), "yy": m.group(3)[-2:], "cvv": m.group(4),
+                "name": "", "street": "", "city": "", "state": "", "zip": "",
+                "country": "US", "phone": "", "email": "", "ip": get_random_ip(),
+            })
+    return cards
 
-async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    return await cmd_start(update, context)
+def bin6(cc: str) -> str:
+    return cc[:6]
 
-# ───────────────────────── SESSION HELPERS ─────────────────────────
-def sess(context):
-    return context.user_data.setdefault("sess", {
-        "mode": "base", "cards": [], "filename": None, "customer": None,
-        "target": 0, "usa": True, "is_tester": False, "tester_kind": None,
-        "batch_id": None
-    })
+def bin_info(cc: str):
+    b = bins()
+    key = bin6(cc)
+    if key in b:
+        return b[key]
+    return {
+        "brand": "UNKNOWN", "type": "", "level": "", "bank": "UNKNOWN",
+        "country": "UNKNOWN", "cc": "XX", "rating": "10/10", "vr": 10,
+        "balance_rating": 10, "suggestion": "General", "forced_vr": None
+    }
 
-def ensure_batch(context):
-    s = sess(context)
-    if not s.get("batch_id"):
-        s["batch_id"] = next_batch()
-    return s["batch_id"]
+def country_flag_bucket(card):
+    info = bin_info(card["cc"])
+    cc = (info.get("cc") or card.get("country") or "US").upper()
+    return "USA" if cc in ("US", "USA", "UNITED STATES") else "FOREIGN"
 
-def pre_summary_text(context, extra_lines=None):
-    s = sess(context)
-    fn = s.get("filename") or f"Batch-{ensure_batch(context)}"
+def format_card_block(card, is_tester=False):
+    info = bin_info(card["cc"])
+    brand = info.get("brand", "VISA")
+    bank = info.get("bank", "UNKNOWN")
+    country = info.get("country", card.get("country", "US"))
+    cc_short = info.get("cc", "US")
+    rating = info.get("rating", "10/10")
+    suggestion = info.get("suggestion", "General")
+    forced = info.get("forced_vr")
+    if forced is not None:
+        rating = f"{forced}/10 FORCE"
+    exp = f"{card['mm']}/{card['yy']}"
+    addr = ", ".join(x for x in [card.get("street"), card.get("city"), card.get("state"), card.get("zip"), country] if x)
+    name = card.get("name") or "N/A"
     lines = [
-        f"Total Cards: {len(s['cards'])}",
-        f"Mode: {s.get('mode', 'base').capitalize()}",
-        f"FileName: {fn if s.get('filename') else 'N/A (will use ' + fn + ')'}",
+        " ══════════════════════════════════════ ",
+        f"👤 Name:{name}💳",
+        f"Card:{card['cc']}📅 Expiry:{exp}🔒CVV:{card['cvv']}",
+        f"🏦Bank:{bank}🌍Country:{cc_short}•{brand.title()}📍",
+        f"Billing Address:{addr or 'N/A'}",
+        f"📞Phone:{card.get('phone') or 'N/A'}✉️",
+        f"Email:{card.get('email') or 'N/A'}🌐",
+        " ══════════════════════════════════════",
+        f"🌐 IP      : {card.get('ip') or get_random_ip()}",
+        f"🕒 Checked : {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC",
+        f"BIN Rate   : {rating} | {suggestion}",
+        "LiveRate   : 100%",
     ]
-    if s.get("mode") == "sale":
-        st = load_settings()
-        rev = s.get("target", 0) * st["sale_price"]
-        lines = [
-            f"Target: {s.get('target', 0)}",
-            f"Total Cards: {len(s['cards'])}",
-            "Mode: Sale",
-            f"Total Revenue: ${rev:.2f}",
-            f"+ (Sale Cost ${st['sale_price']:.2f}/card)",
-            f"Customer: {s.get('customer')}",
-        ]
-    if s.get("mode") == "replace":
-        lines = [
-            f"Total Cards: {len(s['cards'])}",
-            f"Replacement Target: {s.get('target', 0)}",
-            f"Customer Name: {s.get('customer')}",
-        ]
-    if extra_lines:
-        lines.extend(extra_lines)
     return "\n".join(lines)
 
-def post_summary_text(context):
-    s = sess(context)
-    n = len(s["cards"])
-    live = n  # forced 100% live for show
-    live_rate = "100%"
-    st = load_settings()
-    if s.get("mode") == "sale":
-        target = int(s.get("target") or 0)
-        extras = max(0, live - target)
-        reached = live >= target
-        revenue = target * st["sale_price"]  # charge target
-        profit = revenue - (live * st["card_cost"])  # cost on all live pulled
-        return "\n".join([
-            f"Total Cards: {n}",
-            f"Total Live: {live}",
-            f"Extras: {extras}",
-            f"Target Reached: {reached}",
-            f"Profit Made: ${profit:.2f}",
-            f"Total Revenue After Sale: ${revenue:.2f}",
-            f"LiveRate: {live_rate}",
-        ])
-    if s.get("mode") == "replace":
-        target = int(s.get("target") or 0)
-        extras = max(0, live - target)
-        return "\n".join([
-            f"Total Cards: {n}",
-            f"Extras: {extras}",
-            f"Liverate: {live_rate}",
-            f"Replacement Target Reached: {live >= target}",
-            f"Customer Name: {s.get('customer')}",
-        ])
-    # format / tester
-    return "\n".join([
-        f"Total Cards: {n}",
-        f"LiveRate: {live_rate}",
-    ])
+def build_output_file(cards, is_tester=False, vouch=True):
+    blocks = [format_card_block(c, is_tester=is_tester) for c in cards]
+    body = "\n\n".join(blocks)
+    footer = []
+    if is_tester:
+        footer.append("❤️ High Quality Tester From E$CO ❤️")
+    if vouch:
+        footer.append("")
+        footer.append("✅ Please send vouches after pull — helps the desk stay stocked.")
+        footer.append("Vouch format: speed | live | pack quality")
+    if footer:
+        body = body + "\n\n" + "\n".join(footer)
+    return body
 
-def kb_pre_format():
+def main_menu_kb():
+    rows = [
+        [InlineKeyboardButton("Format", callback_data="menu:format"),
+         InlineKeyboardButton("Sale", callback_data="menu:sale")],
+        [InlineKeyboardButton("Replace", callback_data="menu:replace"),
+         InlineKeyboardButton("Tester", callback_data="menu:tester")],
+        [InlineKeyboardButton("Rate", callback_data="menu:rate"),
+         InlineKeyboardButton("Stats", callback_data="menu:stats")],
+        [InlineKeyboardButton("Stockpile", callback_data="menu:stock"),
+         InlineKeyboardButton("Settings", callback_data="menu:settings")],
+        [InlineKeyboardButton("Cancel / Home", callback_data="menu:home")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+def pre_kb(mode):
+    buttons = [
+        [InlineKeyboardButton("Check", callback_data=f"{mode}:check"),
+         InlineKeyboardButton("Set Filename", callback_data=f"{mode}:setfn")],
+        [InlineKeyboardButton("Add More Cards", callback_data=f"{mode}:add"),
+         InlineKeyboardButton("Remove Cards", callback_data=f"{mode}:remove")],
+        [InlineKeyboardButton("Cancel", callback_data="menu:home")],
+    ]
+    if mode == "sale":
+        buttons = [
+            [InlineKeyboardButton("Add More Cards", callback_data=f"{mode}:add"),
+             InlineKeyboardButton("Remove Cards", callback_data=f"{mode}:remove")],
+            [InlineKeyboardButton("Check", callback_data=f"{mode}:check")],
+            [InlineKeyboardButton("Cancel", callback_data="menu:home")],
+        ]
+    return InlineKeyboardMarkup(buttons)
+
+def post_kb(mode):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Check", callback_data="pre_check"),
-         InlineKeyboardButton("Set Filename", callback_data="pre_fname")],
-        [InlineKeyboardButton("Add More Cards", callback_data="pre_add"),
-         InlineKeyboardButton("Remove Cards", callback_data="pre_rm")],
-        [InlineKeyboardButton("Cancel", callback_data="cancel")],
+        [InlineKeyboardButton("Send File", callback_data=f"{mode}:send"),
+         InlineKeyboardButton("Add More Cards", callback_data=f"{mode}:add")],
+        [InlineKeyboardButton("Remove Cards", callback_data=f"{mode}:remove"),
+         InlineKeyboardButton("Cancel", callback_data="menu:home")],
     ])
 
-def kb_pre_sale_rep():
+def usa_foreign_kb(mode):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Check", callback_data="pre_check")],
-        [InlineKeyboardButton("Add More Cards", callback_data="pre_add"),
-         InlineKeyboardButton("Remove Cards", callback_data="pre_rm")],
-        [InlineKeyboardButton("Cancel", callback_data="cancel")],
+        [InlineKeyboardButton("USA", callback_data=f"{mode}:bucket:USA"),
+         InlineKeyboardButton("Foreign", callback_data=f"{mode}:bucket:FOREIGN")],
     ])
 
-def kb_post():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Send File", callback_data="post_send")],
-        [InlineKeyboardButton("Add More Cards", callback_data="post_add"),
-         InlineKeyboardButton("Remove Cards", callback_data="post_rm")],
-        [InlineKeyboardButton("Cancel", callback_data="cancel")],
-    ])
+async def deny(update: Update):
+    if update.callback_query:
+        await update.callback_query.answer("Not authorized", show_alert=True)
+    elif update.message:
+        await update.message.reply_text("Not authorized.")
 
-def kb_usa():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("USA", callback_data="geo_usa"),
-         InlineKeyboardButton("Foreign", callback_data="geo_foreign")],
-        [InlineKeyboardButton("Cancel", callback_data="cancel")],
-    ])
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not is_admin(uid):
+        return await deny(update)
+    context.user_data.clear()
+    uname = update.effective_user.username or update.effective_user.first_name or str(uid)
+    text = f"Private Seller Panel\nWelcome @{uname}"
+    await update.effective_message.reply_text(text, reply_markup=main_menu_kb())
 
-# ───────────────────────── FORMAT FLOW ─────────────────────────
-async def go_format(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await start(update, context)
+
+async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    st = user_stats(uid)
+    txt = (
+        "📊 Stats\n"
+        f"Cards Sold: {st['cards_sold']}\n"
+        f"Total Sales: {st['total_sales']}\n"
+        f"Revenue: ${st['revenue']:.2f}\n"
+        f"Testers Given: {st['testers_given']}\n"
+        f"Replacements Given: {st['replacements_given']}\n"
+        f"Total Profit: ${st['total_profit']:.2f}"
+    )
+    await update.effective_message.reply_text(txt, reply_markup=main_menu_kb())
+
+def session_cards(ud):
+    return ud.setdefault("cards", [])
+
+def presummary_text(ud):
+    mode = ud.get("mode")
+    cards = session_cards(ud)
+    fn = ud.get("filename") or f"Batch-{ud.get('batch', batch_id())}"
+    conf = settings()
+    if mode == "format" or mode == "tester":
+        return (
+            f"PreSummary\n"
+            f"Total Cards: {len(cards)}\n"
+            f"Mode:{'Tester' if mode=='tester' else 'Base'}\n"
+            f"FileName:{fn}\n"
+            f"TesterType:{ud.get('tester_type','N/A')}"
+        )
+    if mode == "sale":
+        target = int(ud.get("target") or 0)
+        rev = target * float(conf["sale_price"])
+        return (
+            f"PreSummary\n"
+            f"Target: {target}\n"
+            f"Total Cards: {len(cards)}\n"
+            f"Mode:Sale\n"
+            f"Customer: {ud.get('customer','N/A')}\n"
+            f"Total Revenue (projected): ${rev:.2f}\n"
+            f"+ (Sale Cost ${conf['sale_price']:.2f}/card)"
+        )
+    if mode == "replace":
+        return (
+            f"PreSummary\n"
+            f"Total Cards: {len(cards)}\n"
+            f"Replacement Target: {ud.get('target')}\n"
+            f"Customer Name: {ud.get('customer')}"
+        )
+    return f"Total Cards: {len(cards)}"
+
+def postsummary_text(ud):
+    mode = ud.get("mode")
+    cards = session_cards(ud)
+    # fake checker: everything live 100%
+    live = list(cards)
+    live_n = len(live)
+    conf = settings()
+    ud["live_cards"] = live
+    if mode in ("format", "tester"):
+        return (
+            f"PostSummary\n"
+            f"Total Cards: {len(cards)}\n"
+            f"LiveRate: 100%\n"
+            f"Live: {live_n}"
+        )
+    if mode == "sale":
+        target = int(ud.get("target") or 0)
+        extras = max(0, live_n - target)
+        reached = live_n >= target
+        sold = min(live_n, target) if target else live_n
+        revenue = sold * float(conf["sale_price"])
+        profit = sold * (float(conf["sale_price"]) - float(conf["card_cost"]))
+        ud["last_sold"] = sold
+        ud["last_revenue"] = revenue
+        ud["last_profit"] = profit
+        ud["extras_count"] = extras
+        return (
+            f"PostSummary\n"
+            f"Total Cards: {len(cards)}\n"
+            f"Total Live: {live_n}\n"
+            f"Extras: {extras}\n"
+            f"Target Reached: {reached}\n"
+            f"Profit Made: ${profit:.2f}\n"
+            f"Total Revenue After Sale: ${revenue:.2f}"
+        )
+    if mode == "replace":
+        target = int(ud.get("target") or 0)
+        extras = max(0, live_n - target)
+        reached = live_n >= target
+        ud["extras_count"] = extras
+        return (
+            f"PostSummary\n"
+            f"Total Cards: {len(cards)}\n"
+            f"Extras: {extras}\n"
+            f"LiveRate: 100%\n"
+            f"Replacement Target Reached: {reached}\n"
+            f"Customer Name: {ud.get('customer')}"
+        )
+    return "PostSummary"
+
+def stock_decrement_for_cards(cards):
+    st = stock()
+    for c in cards:
+        b = bin6(c["cc"])
+        if b in st:
+            st[b] = max(0, int(st[b]) - 1)
+    save_stock(st)
+
+async def send_pre(update, context):
+    ud = context.user_data
+    mode = ud.get("mode")
+    txt = presummary_text(ud)
+    await update.effective_message.reply_text(txt, reply_markup=pre_kb(mode))
+
+async def send_post(update, context):
+    ud = context.user_data
+    mode = ud.get("mode")
+    txt = postsummary_text(ud)
+    await update.effective_message.reply_text(txt, reply_markup=post_kb(mode))
+
+async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    context.user_data["sess"] = {
-        "mode": "base", "cards": [], "filename": None, "customer": None,
-        "target": 0, "usa": True, "is_tester": False, "batch_id": next_batch()
-    }
-    await q.edit_message_text("Send Cards Or Drop .txt File To Continue")
-    return FMT_WAIT_CARDS
+    uid = update.effective_user.id
+    if not is_admin(uid):
+        return await deny(update)
+    data = q.data or ""
+    ud = context.user_data
 
-async def recv_cards_generic(update: Update, context: ContextTypes.DEFAULT_TYPE, next_state_usa):
-    s = sess(context)
-    text = ""
+    if data == "menu:home":
+        ud.clear()
+        uname = update.effective_user.username or str(uid)
+        return await q.edit_message_text(
+            f"Private Seller Panel\nWelcome @{uname}",
+            reply_markup=main_menu_kb(),
+        )
+
+    if data == "menu:stats":
+        st = user_stats(uid)
+        txt = (
+            "📊 Stats\n"
+            f"Cards Sold: {st['cards_sold']}\n"
+            f"Total Sales: {st['total_sales']}\n"
+            f"Revenue: ${st['revenue']:.2f}\n"
+            f"Testers Given: {st['testers_given']}\n"
+            f"Replacements Given: {st['replacements_given']}\n"
+            f"Total Profit: ${st['total_profit']:.2f}"
+        )
+        return await q.edit_message_text(txt, reply_markup=main_menu_kb())
+
+    if data == "menu:settings":
+        conf = settings()
+        ud["mode"] = "settings"
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Set Sale Price", callback_data="settings:sale_price")],
+            [InlineKeyboardButton("Set Card Cost", callback_data="settings:card_cost")],
+            [InlineKeyboardButton("Add Admin ID", callback_data="settings:add_admin")],
+            [InlineKeyboardButton("Home", callback_data="menu:home")],
+        ])
+        return await q.edit_message_text(
+            f"Settings\nSale price: ${conf['sale_price']}\nCard cost: ${conf['card_cost']}\nAdmins: {sorted(ADMIN_IDS)}",
+            reply_markup=kb,
+        )
+
+    if data.startswith("settings:"):
+        field = data.split(":",1)[1]
+        ud["mode"] = "settings"
+        ud["settings_field"] = field
+        prompts = {
+            "sale_price": "Send new sale price (number).",
+            "card_cost": "Send new card cost (number).",
+            "add_admin": "Send numeric Telegram user id to add as admin.",
+        }
+        return await q.edit_message_text(prompts.get(field, "Send value"))
+
+    if data == "menu:format":
+        ud.clear()
+        ud["mode"] = "format"
+        ud["batch"] = batch_id()
+        ud["cards"] = []
+        ud["await"] = "cards"
+        return await q.edit_message_text("Send Cards Or Drop .txt File To Continue")
+
+    if data == "menu:sale":
+        ud.clear()
+        ud["mode"] = "sale"
+        ud["batch"] = batch_id()
+        ud["cards"] = []
+        ud["await"] = "customer"
+        return await q.edit_message_text("Please Respond With The Customer Name")
+
+    if data == "menu:replace":
+        ud.clear()
+        ud["mode"] = "replace"
+        ud["batch"] = batch_id()
+        ud["cards"] = []
+        ud["await"] = "customer"
+        return await q.edit_message_text("Who Is Being Replaced")
+
+    if data == "menu:tester":
+        ud.clear()
+        ud["mode"] = "tester"
+        ud["batch"] = batch_id()
+        ud["cards"] = []
+        ud["await"] = "tester_type"
+        return await q.edit_message_text("Is This Tester A Drop Or Gift?")
+
+    if data == "menu:rate":
+        ud["mode"] = "rate"
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Set Bin VR", callback_data="rate:set_vr")],
+            [InlineKeyboardButton("Rate Bin", callback_data="rate:rate_bin")],
+            [InlineKeyboardButton("Set Bin Balance Rating", callback_data="rate:set_bal")],
+            [InlineKeyboardButton("Bin Use Suggestion", callback_data="rate:suggest")],
+            [InlineKeyboardButton("Force VR", callback_data="rate:force_vr")],
+            [InlineKeyboardButton("Home", callback_data="menu:home")],
+        ])
+        return await q.edit_message_text("Rate menu", reply_markup=kb)
+
+    if data.startswith("rate:"):
+        action = data.split(":",1)[1]
+        ud["mode"] = "rate"
+        ud["rate_action"] = action
+        ud["await"] = "bin"
+        return await q.edit_message_text("Send Bin 6 Digit Number")
+
+    if data == "menu:stock":
+        ud["mode"] = "stock"
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Add Bins", callback_data="stock:add")],
+            [InlineKeyboardButton("Subtract Bins", callback_data="stock:sub")],
+            [InlineKeyboardButton("Search Bin", callback_data="stock:search")],
+            [InlineKeyboardButton("Send Binlist", callback_data="stock:send")],
+            [InlineKeyboardButton("Set Binlist Filename", callback_data="stock:setfn")],
+            [InlineKeyboardButton("Home", callback_data="menu:home")],
+        ])
+        st = stock()
+        total = sum(int(v) for v in st.values()) if st else 0
+        return await q.edit_message_text(
+            f"Stockpile\nBins tracked: {len(st)}\nTotal qty: {total}\nFilename: {ud.get('stock_fn','stockpile-binlist.txt')}",
+            reply_markup=kb,
+        )
+
+    if data.startswith("stock:"):
+        act = data.split(":",1)[1]
+        ud["mode"] = "stock"
+        if act == "add":
+            ud["await"] = "stock_bin"
+            ud["stock_op"] = "add"
+            return await q.edit_message_text("Send BIN (6 digits) to ADD")
+        if act == "sub":
+            ud["await"] = "stock_bin"
+            ud["stock_op"] = "sub"
+            return await q.edit_message_text("Send BIN (6 digits) to SUBTRACT")
+        if act == "search":
+            ud["await"] = "stock_search"
+            return await q.edit_message_text("Send BIN to search (reply is forwardable)")
+        if act == "setfn":
+            ud["await"] = "stock_fn"
+            return await q.edit_message_text("Send filename for stockpile binlist export")
+        if act == "send":
+            st = stock()
+            bdb = bins()
+            lines = []
+            for b, qty in sorted(st.items()):
+                info = bdb.get(b, {})
+                country = info.get("country") or info.get("cc") or "UNKNOWN"
+                lines.append(f"{b}*{qty}*{country}")
+            fn = ud.get("stock_fn") or "stockpile-binlist.txt"
+            content = "\n".join(lines) if lines else "EMPTY"
+            bio = io.BytesIO(content.encode())
+            bio.name = fn
+            await context.bot.send_document(uid, document=InputFile(bio), caption="Stockpile binlist")
+            return
+
+    # mode shared actions: format/sale/replace/tester
+    if ":" in data:
+        mode, action = data.split(":", 1)
+        if mode in ("format", "sale", "replace", "tester"):
+            ud["mode"] = mode
+            if action.startswith("bucket:"):
+                bucket = action.split(":",1)[1]
+                # filter last added batch by bucket if desired; keep all by default, store preference
+                ud["bucket"] = bucket
+                return await send_pre(update, context)
+
+            if action == "add":
+                ud["await"] = "cards"
+                return await q.edit_message_text("Please Send More Cards Or Drop Another .txt File To Continue")
+
+            if action == "remove":
+                ud["await"] = "remove"
+                return await q.edit_message_text("Send Last 4# Seperated By Commas Of The Card(s) You Want Removed")
+
+            if action == "setfn":
+                ud["await"] = "filename"
+                return await q.edit_message_text("Send filename (without path). Example: BatchCust-01")
+
+            if action == "check":
+                # show-only checker
+                return await send_post(update, context)
+
+            if action == "send":
+                cards = ud.get("live_cards") or session_cards(ud)
+                conf = settings()
+                mode = ud.get("mode")
+                is_tester = mode == "tester"
+                if mode == "format":
+                    fn = ud.get("filename") or f"Batch-{ud.get('batch', batch_id())}.txt"
+                    if not fn.endswith(".txt"):
+                        fn += ".txt"
+                    content = build_output_file(cards, is_tester=False)
+                    bio = io.BytesIO(content.encode())
+                    bio.name = fn
+                    await context.bot.send_document(uid, document=InputFile(bio), caption="Formatted pack")
+                elif mode == "tester":
+                    fn = ud.get("filename") or f"Tester-{ud.get('batch', batch_id())}.txt"
+                    if not fn.endswith(".txt"):
+                        fn += ".txt"
+                    content = build_output_file(cards, is_tester=True)
+                    bio = io.BytesIO(content.encode())
+                    bio.name = fn
+                    await context.bot.send_document(uid, document=InputFile(bio), caption=f"Tester ({ud.get('tester_type')})")
+                    st = user_stats(uid)
+                    st["testers_given"] += len(cards)
+                    put_user_stats(uid, st)
+                elif mode == "sale":
+                    target = int(ud.get("target") or 0)
+                    live = cards
+                    sold_n = min(len(live), target) if target else len(live)
+                    primary = live[:sold_n]
+                    extras = live[sold_n:]
+                    cust = re.sub(r"[^\w\-]+", "_", str(ud.get("customer", "Customer")))
+                    fn = f"{cust}-{len(primary)}-{ud.get('batch', batch_id())}.txt"
+                    content = build_output_file(primary)
+                    bio = io.BytesIO(content.encode())
+                    bio.name = fn
+                    await context.bot.send_document(uid, document=InputFile(bio), caption="Sale pack")
+                    if extras:
+                        fn2 = f"Extras-{len(extras)}-{ud.get('batch', batch_id())}.txt"
+                        bio2 = io.BytesIO(build_output_file(extras).encode())
+                        bio2.name = fn2
+                        await context.bot.send_document(uid, document=InputFile(bio2), caption="Extras")
+                    # accounting
+                    st = user_stats(uid)
+                    revenue = sold_n * float(conf["sale_price"])
+                    profit = sold_n * (float(conf["sale_price"]) - float(conf["card_cost"]))
+                    st["cards_sold"] += sold_n
+                    st["total_sales"] += 1
+                    st["revenue"] += revenue
+                    st["total_profit"] += profit
+                    put_user_stats(uid, st)
+                    stock_decrement_for_cards(primary)
+                elif mode == "replace":
+                    target = int(ud.get("target") or 0)
+                    live = cards
+                    primary = live[:target] if target else live
+                    extras = live[len(primary):]
+                    cust = re.sub(r"[^\w\-]+", "_", str(ud.get("customer", "Customer")))
+                    fn = f"{cust}-{len(primary)}-{ud.get('batch', batch_id())}.txt"
+                    bio = io.BytesIO(build_output_file(primary).encode())
+                    bio.name = fn
+                    await context.bot.send_document(uid, document=InputFile(bio), caption="Replacement pack")
+                    if extras:
+                        fn2 = f"Extras-{len(extras)}-{ud.get('batch', batch_id())}.txt"
+                        bio2 = io.BytesIO(build_output_file(extras).encode())
+                        bio2.name = fn2
+                        await context.bot.send_document(uid, document=InputFile(bio2), caption="Extras")
+                    st = user_stats(uid)
+                    st["replacements_given"] += len(primary)
+                    # subtract card cost from revenue/profit
+                    cost = len(primary) * float(conf["card_cost"])
+                    st["revenue"] -= cost
+                    st["total_profit"] -= cost
+                    put_user_stats(uid, st)
+                    stock_decrement_for_cards(primary)
+                ud["await"] = None
+                await context.bot.send_message(uid, "Done. /cancel for Admin panel", reply_markup=main_menu_kb())
+                return
+
+async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not is_admin(uid):
+        return await deny(update)
+    ud = context.user_data
+    text = (update.message.text or "").strip() if update.message else ""
+
+    # file drop
+    cards_from_file = []
     if update.message.document:
         f = await update.message.document.get_file()
-        data = await f.download_as_bytearray()
-        text = data.decode("utf-8", errors="ignore")
-    else:
-        text = update.message.text or ""
-    new_cards = parse_cards_text(text)
-    if not new_cards:
-        await update.message.reply_text("No valid cards found. Format:\npan|mm/yy|cvv|name|street|city|state|zip|CC|phone|email|ip")
-        return next_state_usa  # stay
-    s.setdefault("pending", []).extend(new_cards)
-    await update.message.reply_text("USA Or Foreign?", reply_markup=kb_usa())
-    return next_state_usa
+        raw = await f.download_as_bytearray()
+        try:
+            payload = raw.decode("utf-8", errors="ignore")
+        except Exception:
+            payload = ""
+        cards_from_file = parse_cards(payload)
+        text = payload
 
-async def fmt_wait_cards(update, context):
-    return await recv_cards_generic(update, context, FMT_USA_FOR)
+    awaiting = ud.get("await")
+    mode = ud.get("mode")
 
-async def geo_choice(update, context):
-    q = update.callback_query
-    await q.answer()
-    s = sess(context)
-    s["usa"] = q.data == "geo_usa"
-    pending = s.pop("pending", [])
-    filtered = filter_usa_foreign(pending, usa=s["usa"])
-    s["cards"].extend(filtered)
-    ensure_batch(context)
-    await q.edit_message_text(pre_summary_text(context), reply_markup=kb_pre_format() if s["mode"] in ("base", "tester") else kb_pre_sale_rep())
-    mode = s["mode"]
-    if mode == "sale":
-        return SALE_PRE
-    if mode == "replace":
-        return REP_PRE
-    if mode == "tester":
-        return TEST_PRE
-    return FMT_PRE
+    if mode == "settings" and awaiting is None and ud.get("settings_field"):
+        field = ud.get("settings_field")
+        conf = settings()
+        if field in ("sale_price", "card_cost"):
+            try:
+                conf[field] = float(text)
+                save_settings(conf)
+                ud["settings_field"] = None
+                return await update.message.reply_text(f"Updated {field}={conf[field]}", reply_markup=main_menu_kb())
+            except ValueError:
+                return await update.message.reply_text("Number only.")
+        if field == "add_admin":
+            try:
+                new_id = int(text)
+                ADMIN_IDS.add(new_id)
+                ud["settings_field"] = None
+                return await update.message.reply_text(f"Admin {new_id} added for this runtime. Also add to Railway ADMIN_IDS for persistence.", reply_markup=main_menu_kb())
+            except ValueError:
+                return await update.message.reply_text("Numeric user id only.")
 
-async def pre_buttons(update, context):
-    q = update.callback_query
-    await q.answer()
-    s = sess(context)
-    data = q.data
-    if data == "cancel":
-        return await cmd_cancel(update, context)
-    if data == "pre_fname":
-        await q.edit_message_text("Send filename (without .txt):")
-        return FMT_FNAME if s["mode"] == "base" else TEST_FNAME
-    if data == "pre_add":
-        await q.edit_message_text("Please Send More Cards Or Drop Another .txt File To Continue")
-        return {
-            "base": FMT_WAIT_CARDS, "sale": SALE_WAIT_CARDS,
-            "replace": REP_WAIT_CARDS, "tester": TEST_WAIT_CARDS
-        }[s["mode"]]
-    if data == "pre_rm":
-        await q.edit_message_text("Send Last 4# Separated By Commas Of The Card(s) You Want Removed")
-        return {
-            "base": FMT_REMOVE, "sale": SALE_REMOVE,
-            "replace": REP_REMOVE, "tester": TEST_REMOVE
-        }[s["mode"]]
-    if data == "pre_check":
-        # show-only checker — all live 100%
-        await q.edit_message_text(post_summary_text(context), reply_markup=kb_post())
-        return {
-            "base": FMT_POST, "sale": SALE_POST,
-            "replace": REP_POST, "tester": TEST_POST
-        }[s["mode"]]
-    return MENU
+    if mode == "stock":
+        if awaiting == "stock_fn":
+            ud["stock_fn"] = text if text.endswith(".txt") else text + ".txt"
+            ud["await"] = None
+            return await update.message.reply_text(f"Stock filename set: {ud['stock_fn']}", reply_markup=main_menu_kb())
+        if awaiting == "stock_search":
+            b = re.sub(r"\D", "", text)[:6]
+            st = stock()
+            qty = int(st.get(b, 0))
+            info = bins().get(b, {})
+            msg = (
+                f"BIN STOCK CHECK (forwardable)\n"
+                f"BIN: {b}\n"
+                f"Qty: {qty}\n"
+                f"Bank: {info.get('bank','N/A')}\n"
+                f"Country: {info.get('country','N/A')}\n"
+                f"Brand: {info.get('brand','N/A')}"
+            )
+            ud["await"] = None
+            return await update.message.reply_text(msg)
+        if awaiting == "stock_bin":
+            b = re.sub(r"\D", "", text)[:6]
+            ud["stock_bin"] = b
+            ud["await"] = "stock_qty"
+            return await update.message.reply_text(f"BIN {b} selected. Send amount (integer).")
+        if awaiting == "stock_qty":
+            try:
+                qty = int(text)
+            except ValueError:
+                return await update.message.reply_text("Integer amount only.")
+            st = stock()
+            b = ud.get("stock_bin")
+            cur = int(st.get(b, 0))
+            if ud.get("stock_op") == "add":
+                st[b] = cur + qty
+            else:
+                st[b] = max(0, cur - qty)
+            save_stock(st)
+            # ensure bin exists in bins_db skeleton
+            bdb = bins()
+            if b not in bdb:
+                bdb[b] = {"brand":"UNKNOWN","type":"","level":"","bank":"UNKNOWN","country":"UNKNOWN","cc":"XX","rating":"10/10","vr":10,"balance_rating":10,"suggestion":"General","forced_vr":None}
+                save_bins(bdb)
+            ud["await"] = None
+            return await update.message.reply_text(f"Stock {b} => {st[b]}", reply_markup=main_menu_kb())
 
-async def set_fname(update, context):
-    s = sess(context)
-    name = (update.message.text or "Batch").strip().replace(".txt", "")
-    s["filename"] = name
-    await update.message.reply_text(pre_summary_text(context), reply_markup=kb_pre_format())
-    return FMT_PRE if s["mode"] == "base" else TEST_PRE
+    if mode == "rate" and awaiting == "bin":
+        b = re.sub(r"\D", "", text)[:6]
+        bdb = bins()
+        if b not in bdb:
+            bdb[b] = {"brand":"UNKNOWN","type":"","level":"","bank":"UNKNOWN","country":"UNKNOWN","cc":"XX","rating":"10/10","vr":10,"balance_rating":10,"suggestion":"General","forced_vr":None}
+            save_bins(bdb)
+        ud["rate_bin"] = b
+        info = bdb[b]
+        action = ud.get("rate_action")
+        ud["await"] = "rate_value"
+        return await update.message.reply_text(
+            f"You Have Selected Bin {b}\nBank:{info.get('bank')}\nCountry:{info.get('country')}\nBrand:{info.get('brand')}\n"
+            f"Current VR:{info.get('vr')} Rating:{info.get('rating')} Bal:{info.get('balance_rating')} Sug:{info.get('suggestion')} Force:{info.get('forced_vr')}\n"
+            + {
+                "set_vr": "What Do You Want To Set The Vr Rating As (0-10)",
+                "rate_bin": "Rate Bin itself (0-10 or text like 10/10)",
+                "set_bal": "Set Bin Balance Rating (0-10)",
+                "suggest": "Send suggestion places to use bin",
+                "force_vr": "Set Forced Vr Rating, Say Reset To Disable",
+            }.get(action, "Send value")
+        )
 
-async def remove_cards(update, context):
-    s = sess(context)
-    raw = (update.message.text or "")
-    lasts = [x.strip() for x in raw.split(",") if x.strip()]
-    before = len(s["cards"])
-    s["cards"] = [c for c in s["cards"] if c["pan"][-4:] not in lasts]
-    await update.message.reply_text(
-        f"Removed {before - len(s['cards'])} card(s).\n" + pre_summary_text(context),
-        reply_markup=kb_pre_format() if s["mode"] in ("base", "tester") else kb_pre_sale_rep()
-    )
-    return {
-        "base": FMT_PRE, "sale": SALE_PRE, "replace": REP_PRE, "tester": TEST_PRE
-    }[s["mode"]]
+    if mode == "rate" and awaiting == "rate_value":
+        b = ud.get("rate_bin")
+        bdb = bins()
+        info = bdb.get(b, {})
+        action = ud.get("rate_action")
+        if action == "set_vr":
+            try:
+                v = int(re.sub(r"[^0-9]", "", text) or "0")
+                info["vr"] = max(0, min(10, v))
+                info["rating"] = f"{info['vr']}/10"
+            except Exception:
+                return await update.message.reply_text("0-10 only")
+        elif action == "rate_bin":
+            info["rating"] = text
+        elif action == "set_bal":
+            try:
+                v = int(re.sub(r"[^0-9]", "", text) or "0")
+                info["balance_rating"] = max(0, min(10, v))
+            except Exception:
+                return await update.message.reply_text("0-10 only")
+        elif action == "suggest":
+            info["suggestion"] = text
+        elif action == "force_vr":
+            if text.strip().lower() == "reset":
+                info["forced_vr"] = None
+            else:
+                try:
+                    info["forced_vr"] = int(re.sub(r"[^0-9]", "", text) or "0")
+                except Exception:
+                    return await update.message.reply_text("Number or Reset")
+        bdb[b] = info
+        save_bins(bdb)
+        ud["await"] = None
+        return await update.message.reply_text(f"Updated BIN {b}: {info}", reply_markup=main_menu_kb())
 
-async def post_buttons(update, context):
-    q = update.callback_query
-    await q.answer()
-    s = sess(context)
-    data = q.data
-    if data == "cancel":
-        return await cmd_cancel(update, context)
-    if data == "post_add":
-        await q.edit_message_text("Please Send More Cards Or Drop Another .txt File To Continue")
-        return {
-            "base": FMT_WAIT_CARDS, "sale": SALE_WAIT_CARDS,
-            "replace": REP_WAIT_CARDS, "tester": TEST_WAIT_CARDS
-        }[s["mode"]]
-    if data == "post_rm":
-        await q.edit_message_text("Send Last 4# Separated By Commas Of The Card(s) You Want Removed")
-        return {
-            "base": FMT_REMOVE, "sale": SALE_REMOVE,
-            "replace": REP_REMOVE, "tester": TEST_REMOVE
-        }[s["mode"]]
-    if data == "post_send":
-        return await send_out_file(update, context)
-    return MENU
+    if mode == "sale" and awaiting == "customer":
+        ud["customer"] = text
+        ud["await"] = "target"
+        return await update.message.reply_text(f'How Many Cards Is "{text}" Purchasing (number only)')
 
-async def send_out_file(update, context):
-    q = update.callback_query
-    s = sess(context)
-    bins_db = load_bins()
-    st_set = load_settings()
-    uid = update.effective_user.id
-    ust = get_user_stats(uid)
-    is_tester = s.get("mode") == "tester" or s.get("is_tester")
-    blocks = [format_card_block(c, bins_db, is_tester=is_tester) for c in s["cards"]]
-    body = "\n\n".join(blocks)
-    body += "\n\n══════════════════════════════════════\n✅ Please vouch after successful use.\n══════════════════════════════════════\n"
+    if mode == "replace" and awaiting == "customer":
+        ud["customer"] = text
+        ud["await"] = "target"
+        return await update.message.reply_text("How Many Cards Are Being Replaced (number only)")
 
-    bid = ensure_batch(context)
-    live = len(s["cards"])
-    extras = []
-    primary = s["cards"]
-
-    if s["mode"] == "sale":
-        target = int(s.get("target") or 0)
-        primary = s["cards"][:target] if target else s["cards"]
-        extras = s["cards"][target:] if target and len(s["cards"]) > target else []
-        fname = f"{s.get('customer','Customer')}-{len(primary)}-{bid}.txt"
-        # stockpile deduct
-        stock = load_stock()
-        for c in s["cards"]:
-            b = c["bin"]
-            if b in stock:
-                stock[b] = max(0, int(stock[b]) - 1)
-        save_stock(stock)
-        # stats
-        revenue = target * st_set["sale_price"]
-        cost = live * st_set["card_cost"]
-        ust["cards_sold"] += target
-        ust["total_sales"] += 1
-        ust["revenue"] += revenue
-        ust["total_profit"] += (revenue - cost)
-        set_user_stats(uid, ust)
-    elif s["mode"] == "replace":
-        target = int(s.get("target") or 0)
-        primary = s["cards"][:target] if target else s["cards"]
-        extras = s["cards"][target:] if target and len(s["cards"]) > target else []
-        fname = f"{s.get('customer','Customer')}-{len(primary)}-{bid}.txt"
-        cost = live * st_set["card_cost"]
-        ust["replacements_given"] += target
-        ust["revenue"] -= cost  # subtract card cost from revenue per spec
-        ust["total_profit"] -= cost
-        set_user_stats(uid, ust)
-        stock = load_stock()
-        for c in s["cards"]:
-            b = c["bin"]
-            if b in stock:
-                stock[b] = max(0, int(stock[b]) - 1)
-        save_stock(stock)
-    elif s["mode"] == "tester":
-        fname = (s.get("filename") or f"Tester-{bid}") + ".txt"
-        ust["testers_given"] += live
-        set_user_stats(uid, ust)
-    else:
-        fname = (s.get("filename") or f"Batch-{bid}") + ".txt"
-
-    # rebuild body for primary
-    def file_bytes(card_list):
-        t = "\n\n".join(format_card_block(c, bins_db, is_tester=is_tester) for c in card_list)
-        t += "\n\n══════════════════════════════════════\n✅ Vouch the seller — forward feedback.\n══════════════════════════════════════\n"
-        return io.BytesIO(t.encode("utf-8"))
-
-    bio = file_bytes(primary if s["mode"] in ("sale", "replace") else s["cards"])
-    bio.name = fname
-    chat_id = q.message.chat_id
-    await context.bot.send_document(chat_id, document=InputFile(bio, filename=fname), caption=f"Formatted • LiveRate 100% • {fname}")
-
-    if extras:
-        ebio = file_bytes(extras)
-        ename = f"Extras-{len(extras)}-{bid}.txt"
-        ebio.name = ename
-        await context.bot.send_document(chat_id, document=InputFile(ebio, filename=ename), caption=ename)
-
-    await q.edit_message_text("File(s) sent. Returning to Admin panel.")
-    context.user_data.clear()
-    await context.bot.send_message(chat_id, "Private Seller Panel\nWelcome back", reply_markup=main_keyboard())
-    return MENU
-
-# ───────────────────────── SALE ─────────────────────────
-async def go_sale(update, context):
-    q = update.callback_query
-    await q.answer()
-    context.user_data["sess"] = {
-        "mode": "sale", "cards": [], "filename": None, "customer": None,
-        "target": 0, "usa": True, "is_tester": False, "batch_id": next_batch()
-    }
-    await q.edit_message_text("Please Respond With The Customer Name")
-    return SALE_NAME
-
-async def sale_name(update, context):
-    sess(context)["customer"] = (update.message.text or "Customer").strip()
-    await update.message.reply_text(f'How Many Cards Is "{sess(context)["customer"]}" Purchasing? (number only)')
-    return SALE_QTY
-
-async def sale_qty(update, context):
-    try:
-        qty = int(re.sub(r"\D", "", update.message.text or "0"))
-    except Exception:
-        qty = 0
-    s = sess(context)
-    s["target"] = qty
-    await update.message.reply_text("Target Set\nSend Cards Or Drop .txt File To Continue")
-    return SALE_WAIT_CARDS
-
-async def sale_wait_cards(update, context):
-    return await recv_cards_generic(update, context, SALE_USA_FOR)
-
-# ───────────────────────── REPLACE ─────────────────────────
-async def go_replace(update, context):
-    q = update.callback_query
-    await q.answer()
-    context.user_data["sess"] = {
-        "mode": "replace", "cards": [], "filename": None, "customer": None,
-        "target": 0, "usa": True, "is_tester": False, "batch_id": next_batch()
-    }
-    await q.edit_message_text("Who Is Being Replaced?")
-    return REP_NAME
-
-async def rep_name(update, context):
-    sess(context)["customer"] = (update.message.text or "Customer").strip()
-    await update.message.reply_text("How Many Cards Are Being Replaced? (number)")
-    return REP_QTY
-
-async def rep_qty(update, context):
-    try:
-        qty = int(re.sub(r"\D", "", update.message.text or "0"))
-    except Exception:
-        qty = 0
-    sess(context)["target"] = qty
-    await update.message.reply_text("Target Submitted\nSend Cards Or Drop .txt File To Continue")
-    return REP_WAIT_CARDS
-
-async def rep_wait_cards(update, context):
-    return await recv_cards_generic(update, context, REP_USA_FOR)
-
-# ───────────────────────── TESTER ─────────────────────────
-async def go_tester(update, context):
-    q = update.callback_query
-    await q.answer()
-    context.user_data["sess"] = {
-        "mode": "tester", "cards": [], "filename": None, "customer": None,
-        "target": 0, "usa": True, "is_tester": True, "batch_id": next_batch()
-    }
-    await q.edit_message_text(
-        "Is This Tester A Drop Or Gift?",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Drop", callback_data="test_drop"),
-             InlineKeyboardButton("Gift", callback_data="test_gift")],
-            [InlineKeyboardButton("Cancel", callback_data="cancel")],
-        ])
-    )
-    return TEST_TYPE
-
-async def test_type(update, context):
-    q = update.callback_query
-    await q.answer()
-    if q.data == "cancel":
-        return await cmd_cancel(update, context)
-    sess(context)["tester_kind"] = "drop" if q.data == "test_drop" else "gift"
-    await q.edit_message_text("Send Cards Or Drop .txt File To Continue")
-    return TEST_WAIT_CARDS
-
-async def test_wait_cards(update, context):
-    return await recv_cards_generic(update, context, TEST_USA_FOR)
-
-# ───────────────────────── RATE ─────────────────────────
-async def go_rate(update, context):
-    q = update.callback_query
-    await q.answer()
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Set Bin VR", callback_data="rate_vr")],
-        [InlineKeyboardButton("Rate Bin", callback_data="rate_bin")],
-        [InlineKeyboardButton("Set Bin Balance Rating", callback_data="rate_bal")],
-        [InlineKeyboardButton("Bin Use Suggestion", callback_data="rate_sug")],
-        [InlineKeyboardButton("Force VR", callback_data="rate_force")],
-        [InlineKeyboardButton("Cancel", callback_data="cancel")],
-    ])
-    await q.edit_message_text("Rate Menu", reply_markup=kb)
-    return RATE_MENU
-
-async def rate_menu(update, context):
-    q = update.callback_query
-    await q.answer()
-    if q.data == "cancel":
-        return await cmd_cancel(update, context)
-    context.user_data["rate_action"] = q.data
-    await q.edit_message_text("Send Bin 6 Digit Number")
-    return RATE_BIN
-
-async def rate_bin(update, context):
-    bin6 = re.sub(r"\D", "", update.message.text or "")[:6]
-    bins = load_bins()
-    if bin6 not in bins:
-        bins[bin6] = {
-            "scheme": "unknown", "brand": "UNKNOWN", "type": "", "level": "",
-            "bank": "UNKNOWN", "country": "UNKNOWN", "cc": "US",
-            "rating": "5/10", "vr": 100, "balance_rating": "5/10",
-            "suggestion": "General", "force_vr": None
-        }
-        save_bins(bins)
-    context.user_data["rate_bin"] = bin6
-    b = bins[bin6]
-    info = f"You Have Selected Bin {bin6}\nBank: {b.get('bank')}\nCountry: {b.get('country')}\nRating: {b.get('rating')}\nVR: {b.get('vr')}\nBal: {b.get('balance_rating')}\nSuggest: {b.get('suggestion')}\nForceVR: {b.get('force_vr')}"
-    action = context.user_data.get("rate_action")
-    if action == "rate_force":
-        await update.message.reply_text(info + "\n\nSet Forced Vr Rating, Say Reset To Disable")
-    elif action == "rate_sug":
-        await update.message.reply_text(info + "\n\nSend suggestion text (places to use bin):")
-    elif action == "rate_vr":
-        await update.message.reply_text(info + "\n\nWhat Do You Want To Set The Vr Rating As? (0-10 or %)")
-    elif action == "rate_bal":
-        await update.message.reply_text(info + "\n\nSet balance rating (e.g. 8/10):")
-    else:
-        await update.message.reply_text(info + "\n\nRate Bin itself (e.g. 9/10):")
-    return RATE_VALUE
-
-async def rate_value(update, context):
-    bins = load_bins()
-    bin6 = context.user_data.get("rate_bin")
-    val = (update.message.text or "").strip()
-    action = context.user_data.get("rate_action")
-    b = bins[bin6]
-    if action == "rate_force":
-        if val.lower() == "reset":
-            b["force_vr"] = None
+    if mode in ("sale", "replace") and awaiting == "target":
+        if not text.isdigit():
+            return await update.message.reply_text("Number only.")
+        ud["target"] = int(text)
+        ud["await"] = "cards"
+        if mode == "sale":
+            await update.message.reply_text("Target Set")
+            # sale still needs cards
+            return await update.message.reply_text("Send Cards Or Drop .txt File To Continue")
         else:
-            b["force_vr"] = int(re.sub(r"\D", "", val) or "100")
-    elif action == "rate_sug":
-        b["suggestion"] = val
-    elif action == "rate_vr":
-        b["vr"] = int(re.sub(r"\D", "", val) or "100")
-        if "/" not in val and val.isdigit():
-            b["vr"] = int(val) if int(val) > 10 else int(val) * 10
-    elif action == "rate_bal":
-        b["balance_rating"] = val if "/" in val else f"{val}/10"
-    else:
-        b["rating"] = val if "/" in val else f"{val}/10"
-    bins[bin6] = b
-    save_bins(bins)
-    await update.message.reply_text(f"Updated {bin6}.\n{b}")
-    return await show_admin_panel(update, context)
+            await update.message.reply_text("Target Submitted")
+            return await update.message.reply_text("Send Cards Or Drop .txt File To Continue")
 
-# ───────────────────────── STATS ─────────────────────────
-async def go_stats(update, context):
-    q = update.callback_query
-    await q.answer()
-    ust = get_user_stats(update.effective_user.id)
-    text = (
-        f"Cards Sold: {ust['cards_sold']}\n"
-        f"Total Sales: {ust['total_sales']}\n"
-        f"Revenue: ${ust['revenue']:.2f}\n"
-        f"Testers Given: {ust['testers_given']}\n"
-        f"Replacements Given: {ust['replacements_given']}\n"
-        f"Total Profit: ${ust['total_profit']:.2f}"
-    )
-    await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="cancel")]]))
-    return MENU
+    if mode == "tester" and awaiting == "tester_type":
+        t = text.lower()
+        if t not in ("drop", "gift"):
+            return await update.message.reply_text("Reply Drop or Gift")
+        ud["tester_type"] = t.title()
+        ud["await"] = "cards"
+        return await update.message.reply_text("Send Cards Or Drop .txt File To Continue")
 
-# ───────────────────────── SETTINGS ─────────────────────────
-async def go_settings(update, context):
-    q = update.callback_query
-    await q.answer()
-    st = load_settings()
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"Sale Price (${st['sale_price']})", callback_data="set_sale")],
-        [InlineKeyboardButton(f"Card Cost (${st['card_cost']})", callback_data="set_cost")],
-        [InlineKeyboardButton("Back", callback_data="cancel")],
-    ])
-    await q.edit_message_text("Settings", reply_markup=kb)
-    return SETTINGS_MENU
+    if awaiting == "filename":
+        ud["filename"] = text if text.endswith(".txt") else text
+        ud["await"] = None
+        return await send_pre(update, context)
 
-async def settings_menu(update, context):
-    q = update.callback_query
-    await q.answer()
-    if q.data == "cancel":
-        return await cmd_cancel(update, context)
-    context.user_data["set_key"] = "sale_price" if q.data == "set_sale" else "card_cost"
-    await q.edit_message_text("Send new dollar value (e.g. 5 or 1.5):")
-    return SETTINGS_VALUE
+    if awaiting == "remove":
+        lasts = [x.strip()[-4:] for x in text.split(",") if x.strip()]
+        before = len(session_cards(ud))
+        ud["cards"] = [c for c in session_cards(ud) if c["cc"][-4:] not in lasts]
+        await update.message.reply_text(f"Removed {before - len(ud['cards'])} cards.")
+        ud["await"] = None
+        return await send_pre(update, context)
 
-async def settings_value(update, context):
-    try:
-        val = float((update.message.text or "0").replace("$", "").strip())
-    except Exception:
-        val = 0.0
-    st = load_settings()
-    st[context.user_data.get("set_key", "sale_price")] = val
-    save_settings(st)
-    await update.message.reply_text(f"Saved settings: {st}")
-    return await show_admin_panel(update, context)
+    if awaiting == "cards" or cards_from_file:
+        new_cards = cards_from_file or parse_cards(text)
+        if not new_cards:
+            return await update.message.reply_text("No cards detected. Use pipe format or .txt drop.")
+        session_cards(ud).extend(new_cards)
+        ud["batch"] = batch_id()  # new batch id on each add; send still dumps full session
+        ud["await"] = None
+        # ask USA/Foreign then presummary
+        await update.message.reply_text(
+            f"Added {len(new_cards)}. Total now {len(session_cards(ud))}. Choose bucket:",
+            reply_markup=usa_foreign_kb(ud.get("mode") or "format"),
+        )
+        return
 
-# ───────────────────────── STOCKPILE ─────────────────────────
-async def go_stock(update, context):
-    q = update.callback_query
-    await q.answer()
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Add Bins", callback_data="stock_add"),
-         InlineKeyboardButton("Subtract Bins", callback_data="stock_sub")],
-        [InlineKeyboardButton("Search Bin", callback_data="stock_search")],
-        [InlineKeyboardButton("Send Binlist", callback_data="stock_send")],
-        [InlineKeyboardButton("Back", callback_data="cancel")],
-    ])
-    stock = load_stock()
-    preview = "\n".join(f"{b}*{qtp}*?" for b, qtp in sorted(stock.items())[:20]) or "(empty)"
-    await q.edit_message_text(f"Stockpile\n{preview}", reply_markup=kb)
-    return STOCK_MENU
+    # default
+    if text.startswith("/"):
+        return
+    await update.message.reply_text("Use panel buttons or /cancel", reply_markup=main_menu_kb())
 
-async def stock_menu(update, context):
-    q = update.callback_query
-    await q.answer()
-    if q.data == "cancel":
-        return await cmd_cancel(update, context)
-    if q.data == "stock_send":
-        await q.edit_message_text("Choose output filename for binlist (without .txt):")
-        context.user_data["stock_action"] = "send"
-        return STOCK_FNAME
-    if q.data == "stock_search":
-        await q.edit_message_text("Type the BIN to search (forwardable result):")
-        return STOCK_SEARCH
-    context.user_data["stock_action"] = "add" if q.data == "stock_add" else "sub"
-    await q.edit_message_text("Send bin 6-digit number:")
-    return STOCK_BIN
-
-async def stock_bin(update, context):
-    bin6 = re.sub(r"\D", "", update.message.text or "")[:6]
-    context.user_data["stock_bin"] = bin6
-    # ensure bins_db knows it
-    bins = load_bins()
-    if bin6 not in bins:
-        bins[bin6] = DEFAULT_BINS.get(bin6, {
-            "scheme": "unknown", "brand": "UNKNOWN", "type": "", "level": "",
-            "bank": "UNKNOWN", "country": "UNKNOWN", "cc": "US",
-            "rating": "5/10", "vr": 100, "balance_rating": "5/10",
-            "suggestion": "General", "force_vr": None
-        })
-        save_bins(bins)
-    await update.message.reply_text(f"Bin {bin6}. Send amount to {context.user_data.get('stock_action')}:")
-    return STOCK_AMT
-
-async def stock_amt(update, context):
-    try:
-        amt = int(re.sub(r"\D", "", update.message.text or "0"))
-    except Exception:
-        amt = 0
-    bin6 = context.user_data.get("stock_bin")
-    stock = load_stock()
-    cur = int(stock.get(bin6, 0))
-    if context.user_data.get("stock_action") == "add":
-        stock[bin6] = cur + amt
-    else:
-        stock[bin6] = max(0, cur - amt)
-    save_stock(stock)
-    await update.message.reply_text(f"Stock {bin6} = {stock[bin6]}")
-    return await show_admin_panel(update, context)
-
-async def stock_search(update, context):
-    bin6 = re.sub(r"\D", "", update.message.text or "")[:6]
-    stock = load_stock()
-    bins = load_bins()
-    qty = int(stock.get(bin6, 0))
-    b = bin_info(bin6, bins)
-    # forwardable plain text
-    msg = (
-        f"BIN STOCK CHECK\n"
-        f"Bin: {bin6}\n"
-        f"Qty: {qty}\n"
-        f"Bank: {b.get('bank')}\n"
-        f"Country: {b.get('country')}\n"
-        f"Scheme: {b.get('brand')}\n"
-        f"Updated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC"
-    )
-    await update.message.reply_text(msg)
-    return await show_admin_panel(update, context)
-
-async def stock_fname(update, context):
-    fname = (update.message.text or "stockpile").strip().replace(".txt", "") + ".txt"
-    stock = load_stock()
-    bins = load_bins()
-    lines = []
-    for b, qty in sorted(stock.items()):
-        info = bin_info(b, bins)
-        cc = info.get("cc") or info.get("country") or "?"
-        lines.append(f"{b}*{qty}*{cc}")
-    text = "\n".join(lines) or "EMPTY"
-    bio = io.BytesIO(text.encode("utf-8"))
-    bio.name = fname
-    await update.message.reply_document(document=InputFile(bio, filename=fname), caption="Stockpile binlist Bin*Qty*Country")
-    return await show_admin_panel(update, context)
-
-# ───────────────────────── MENU ROUTER ─────────────────────────
-async def menu_router(update, context):
-    q = update.callback_query
-    await q.answer()
-    d = q.data
-    if d == "cancel":
-        return await cmd_cancel(update, context)
-    if d == "go_format":
-        return await go_format(update, context)
-    if d == "go_sale":
-        return await go_sale(update, context)
-    if d == "go_replace":
-        return await go_replace(update, context)
-    if d == "go_tester":
-        return await go_tester(update, context)
-    if d == "go_rate":
-        return await go_rate(update, context)
-    if d == "go_stats":
-        return await go_stats(update, context)
-    if d == "go_settings":
-        return await go_settings(update, context)
-    if d == "go_stock":
-        return await go_stock(update, context)
-    return MENU
-
-# ───────────────────────── BUILD APP ─────────────────────────
 def main():
-    # seed files
-    load_bins()
-    load_settings()
-    load_stock()
-    if not os.path.exists(STATS_FILE):
-        save_all_stats({})
-
+    # no range(28) unpack — that was your crash
     app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("cancel", cancel_cmd))
+    app.add_handler(CommandHandler("stats", show_stats))
+    app.add_handler(CommandHandler("format", lambda u,c: on_callback_equiv(u,c,"menu:format")))
+    app.add_handler(CommandHandler("sale", lambda u,c: on_callback_equiv(u,c,"menu:sale")))
+    app.add_handler(CommandHandler("replace", lambda u,c: on_callback_equiv(u,c,"menu:replace")))
+    app.add_handler(CommandHandler("tester", lambda u,c: on_callback_equiv(u,c,"menu:tester")))
+    app.add_handler(CommandHandler("rate", lambda u,c: on_callback_equiv(u,c,"menu:rate")))
+    app.add_handler(CommandHandler("list", start))
+    app.add_handler(CallbackQueryHandler(on_callback))
+    app.add_handler(MessageHandler(filters.Document.ALL | filters.TEXT, on_message))
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
-    conv = ConversationHandler(
-        entry_points=[
-            CommandHandler("start", cmd_start),
-            CommandHandler("list", cmd_list),
-            CommandHandler("format", lambda u, c: go_format(u, c) if u.callback_query else cmd_start(u, c)),
-        ],
-        states={
-            MENU: [
-                CallbackQueryHandler(menu_router),
-                CommandHandler("cancel", cmd_cancel),
-            ],
-            FMT_WAIT_CARDS: [MessageHandler(filters.Document.ALL | filters.TEXT, fmt_wait_cards), CommandHandler("cancel", cmd_cancel)],
-            FMT_USA_FOR: [CallbackQueryHandler(geo_choice, pattern="^geo_"), CallbackQueryHandler(cmd_cancel, pattern="^cancel$")],
-            FMT_PRE: [CallbackQueryHandler(pre_buttons), CommandHandler("cancel", cmd_cancel)],
-            FMT_POST: [CallbackQueryHandler(post_buttons), CommandHandler("cancel", cmd_cancel)],
-            FMT_REMOVE: [MessageHandler(filters.TEXT, remove_cards), CommandHandler("cancel", cmd_cancel)],
-            FMT_FNAME: [MessageHandler(filters.TEXT, set_fname), CommandHandler("cancel", cmd_cancel)],
-
-            SALE_NAME: [MessageHandler(filters.TEXT, sale_name), CommandHandler("cancel", cmd_cancel)],
-            SALE_QTY: [MessageHandler(filters.TEXT, sale_qty), CommandHandler("cancel", cmd_cancel)],
-            SALE_WAIT_CARDS: [MessageHandler(filters.Document.ALL | filters.TEXT, sale_wait_cards), CommandHandler("cancel", cmd_cancel)],
-            SALE_USA_FOR: [CallbackQueryHandler(geo_choice, pattern="^geo_"), CallbackQueryHandler(cmd_cancel, pattern="^cancel$")],
-            SALE_PRE: [CallbackQueryHandler(pre_buttons), CommandHandler("cancel", cmd_cancel)],
-            SALE_POST: [CallbackQueryHandler(post_buttons), CommandHandler("cancel", cmd_cancel)],
-            SALE_REMOVE: [MessageHandler(filters.TEXT, remove_cards), CommandHandler("cancel", cmd_cancel)],
-
-            REP_NAME: [MessageHandler(filters.TEXT, rep_name), CommandHandler("cancel", cmd_cancel)],
-            REP_QTY: [MessageHandler(filters.TEXT, rep_qty), CommandHandler("cancel", cmd_cancel)],
-            REP_WAIT_CARDS: [MessageHandler(filters.Document.ALL | filters.TEXT, rep_wait_cards), CommandHandler("cancel", cmd_cancel)],
-            REP_USA_FOR: [CallbackQueryHandler(geo_choice, pattern="^geo_"), CallbackQueryHandler(cmd_cancel, pattern="^cancel$")],
-            REP_PRE: [CallbackQueryHandler(pre_buttons), CommandHandler("cancel", cmd_cancel)],
-            REP_POST: [CallbackQueryHandler(post_buttons), CommandHandler("cancel", cmd_cancel)],
-            REP_REMOVE: [MessageHandler(filters.TEXT, remove_cards), CommandHandler("cancel", cmd_cancel)],
-
-            TEST_TYPE: [CallbackQueryHandler(test_type), CommandHandler("cancel", cmd_cancel)],
-            TEST_WAIT_CARDS: [MessageHandler(filters.Document.ALL | filters.TEXT, test_wait_cards), CommandHandler("cancel", cmd_cancel)],
-            TEST_USA_FOR: [CallbackQueryHandler(geo_choice, pattern="^geo_"), CallbackQueryHandler(cmd_cancel, pattern="^cancel$")],
-            TEST_PRE: [CallbackQueryHandler(pre_buttons), CommandHandler("cancel", cmd_cancel)],
-            TEST_POST: [CallbackQueryHandler(post_buttons), CommandHandler("cancel", cmd_cancel)],
-            TEST_REMOVE: [MessageHandler(filters.TEXT, remove_cards), CommandHandler("cancel", cmd_cancel)],
-            TEST_FNAME: [MessageHandler(filters.TEXT, set_fname), CommandHandler("cancel", cmd_cancel)],
-
-            RATE_MENU: [CallbackQueryHandler(rate_menu), CommandHandler("cancel", cmd_cancel)],
-            RATE_BIN: [MessageHandler(filters.TEXT, rate_bin), CommandHandler("cancel", cmd_cancel)],
-            RATE_VALUE: [MessageHandler(filters.TEXT, rate_value), CommandHandler("cancel", cmd_cancel)],
-
-            SETTINGS_MENU: [CallbackQueryHandler(settings_menu), CommandHandler("cancel", cmd_cancel)],
-            SETTINGS_VALUE: [MessageHandler(filters.TEXT, settings_value), CommandHandler("cancel", cmd_cancel)],
-
-            STOCK_MENU: [CallbackQueryHandler(stock_menu), CommandHandler("cancel", cmd_cancel)],
-            STOCK_BIN: [MessageHandler(filters.TEXT, stock_bin), CommandHandler("cancel", cmd_cancel)],
-            STOCK_AMT: [MessageHandler(filters.TEXT, stock_amt), CommandHandler("cancel", cmd_cancel)],
-            STOCK_FNAME: [MessageHandler(filters.TEXT, stock_fname), CommandHandler("cancel", cmd_cancel)],
-            STOCK_SEARCH: [MessageHandler(filters.TEXT, stock_search), CommandHandler("cancel", cmd_cancel)],
-        },
-        fallbacks=[
-            CommandHandler("cancel", cmd_cancel),
-            CommandHandler("start", cmd_start),
-            CallbackQueryHandler(cmd_cancel, pattern="^cancel$"),
-        ],
-        allow_reentry=True,
-    )
-
-    app.add_handler(conv)
-    app.add_handler(CommandHandler("stats", lambda u, c: go_stats(u, c) if u.callback_query else cmd_start(u, c)))
-    print("Private Seller Panel bot running…")
-    app.run_polling()
+async def on_callback_equiv(update, context, data):
+    # synthesize menu route for slash commands
+    if not is_admin(update.effective_user.id):
+        return await deny(update)
+    class Q:
+        pass
+    # simplest: reuse flows
+    ud = context.user_data
+    if data == "menu:format":
+        ud.clear(); ud.update({"mode":"format","batch":batch_id(),"cards":[],"await":"cards"})
+        await update.message.reply_text("Send Cards Or Drop .txt File To Continue")
+    elif data == "menu:sale":
+        ud.clear(); ud.update({"mode":"sale","batch":batch_id(),"cards":[],"await":"customer"})
+        await update.message.reply_text("Please Respond With The Customer Name")
+    elif data == "menu:replace":
+        ud.clear(); ud.update({"mode":"replace","batch":batch_id(),"cards":[],"await":"customer"})
+        await update.message.reply_text("Who Is Being Replaced")
+    elif data == "menu:tester":
+        ud.clear(); ud.update({"mode":"tester","batch":batch_id(),"cards":[],"await":"tester_type"})
+        await update.message.reply_text("Is This Tester A Drop Or Gift?")
+    elif data == "menu:rate":
+        await update.message.reply_text("Use Rate button panel or /start")
 
 if __name__ == "__main__":
     main()
