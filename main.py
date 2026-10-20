@@ -534,7 +534,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             content = "\n".join(lines) if lines else "EMPTY"
             bio = io.BytesIO(content.encode())
             bio.name = fn
-            await context.bot.send_document(uid, document=InputFile(bio), caption="Stockpile binlist")
+            await context.bot.send_document(uid, document=InputFile(bio), caption="10$ @Vonadon")
             return
 
     # mode shared actions: format/sale/replace/tester
